@@ -1,0 +1,170 @@
+services:
+
+  # ── Datenbanken ───────────────────────────────────────
+
+  book-db:
+    image: postgres:16
+    container_name: book-db
+    environment:
+      POSTGRES_DB: bookdb
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library123
+    ports:
+      - "5432:5432"
+    volumes:
+      - book-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U library -d bookdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  user-db:
+    image: postgres:16
+    container_name: user-db
+    environment:
+      POSTGRES_DB: userdb
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library123
+    ports:
+      - "5433:5432"
+    volumes:
+      - user-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U library -d userdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  notification-db:
+    image: mongo:latest
+    container_name: notification-db
+    environment:
+      MONGO_INITDB_DATABASE: notificationdb
+    ports:
+      - "27017:27017"
+    volumes:
+      - notification-db-data:/data/db
+
+  # ── Messaging ─────────────────────────────────────────
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda start
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:9092
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Services ──────────────────────────────────────────
+
+  book-catalog-service:
+    image: smart-library/book-catalog-service:1.0
+    container_name: book-catalog-service
+    ports:
+      - "8081:8081"
+    environment:
+      QUARKUS_DATASOURCE_REACTIVE_URL: vertx-reactive:postgresql://book-db:5432/bookdb
+      QUARKUS_DATASOURCE_USERNAME: library
+      QUARKUS_DATASOURCE_PASSWORD: library123
+      QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY: update
+      QUARKUS_OPENTELEMETRY_TRACER_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      book-db:
+        condition: service_healthy
+
+  user-loan-service:
+    image: smart-library/user-loan-service:1.0
+    container_name: user-loan-service
+    ports:
+      - "8082:8082"
+    environment:
+      QUARKUS_DATASOURCE_REACTIVE_URL: vertx-reactive:postgresql://user-db:5432/userdb
+      QUARKUS_DATASOURCE_USERNAME: library
+      QUARKUS_DATASOURCE_PASSWORD: library123
+      QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY: update
+      QUARKUS_REST_CLIENT_BOOK_CATALOG_CLIENT_URL: http://book-catalog-service:8081
+      QUARKUS_OPENTELEMETRY_TRACER_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      user-db:
+        condition: service_healthy
+      book-catalog-service:
+        condition: service_started
+
+  notification-service:
+    image: smart-library/notification-service:1.0
+    container_name: notification-service
+    ports:
+      - "8083:8083"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:29092
+      QUARKUS_OPENTELEMETRY_TRACER_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+    depends_on:
+      redpanda:
+        condition: service_healthy
+
+  # ── API Gateway ───────────────────────────────────────
+
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"    # Traefik Dashboard
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # ── Observability ─────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - book-catalog-service
+      - user-loan-service
+      - notification-service
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "4317:4317"   # gRPC receiver for OTEL
+      - "4318:4318"   # HTTP receiver for OTEL
+
+# ── Volumes ───────────────────────────────────────────
+
+volumes:
+  book-db-data:
+  user-db-data:
+  notification-db-data:

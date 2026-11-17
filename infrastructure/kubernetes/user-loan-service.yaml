@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-loan-service
+  labels:
+    app: user-loan-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: user-loan-service
+  template:
+    metadata:
+      labels:
+        app: user-loan-service
+    spec:
+      containers:
+        - name: user-loan-service
+          image: smart-library/user-loan-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8082
+          env:
+            - name: QUARKUS_DATASOURCE_REACTIVE_URL
+              value: vertx-reactive:postgresql://user-db:5432/userdb
+            - name: QUARKUS_DATASOURCE_USERNAME
+              value: library
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              value: library123
+            - name: QUARKUS_HIBERNATE_ORM_SCHEMA_MANAGEMENT_STRATEGY
+              value: update
+            - name: QUARKUS_REST_CLIENT_BOOK_CATALOG_CLIENT_URL
+              value: http://book-catalog-service:8081
+            - name: QUARKUS_OPENTELEMETRY_TRACER_EXPORTER_OTLP_ENDPOINT
+              value: http://jaeger:4317
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8082
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8082
+            initialDelaySeconds: 15
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-loan-service
+spec:
+  ports:
+    - port: 8082
+      targetPort: 8082
+  selector:
+    app: user-loan-service
